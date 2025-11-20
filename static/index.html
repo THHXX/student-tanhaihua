@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>学生管理系统 - 前端</title>
+  <link rel="preconnect" href="https://unpkg.com">
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 24px; background: #f8fafc; color: #111827; }
+    h1 { margin-bottom: 16px; }
+    #app { background: #ffffff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); padding: 16px; }
+    section { margin-bottom: 16px; }
+    input { padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 6px; background: #ffffff; color: #111827; margin-right: 8px; }
+    button { padding: 8px 12px; border: 1px solid #1f2937; border-radius: 6px; background: #1f2937; color: #ffffff; cursor: pointer; margin-right: 8px; }
+    button:hover { background: #111827; }
+    table { border-collapse: collapse; width: 100%; background: #ffffff; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px; }
+    th { background: #eef2f7; text-align: left; }
+    tbody tr:nth-child(odd) { background: #fafbfc; }
+    .actions { margin-top: 16px; }
+    .toast { position: fixed; left: 50%; top: 24px; transform: translateX(-50%); padding: 10px 14px; border-radius: 8px; color: #111827; background: #e5f6ff; border: 1px solid #38bdf8; box-shadow: 0 2px 6px rgba(0,0,0,0.12); z-index: 9999; }
+    .toast.error { background: #fee2e2; border-color: #ef4444; }
+    .toast.success { background: #dcfce7; border-color: #22c55e; }
+  </style>
+  </head>
+<body>
+  <h1>学生管理系统</h1>
+  <div id="app">
+    <div style="margin-bottom:8px; display:flex; gap:12px; align-items:center">
+      <a href="/docs" target="_blank">查看 API 文档</a>
+      <template v-if="token">
+        <span style="font-size:12px;color:#555">Token: {{ token.slice(0,12) + '...' }}</span>
+        <button @click="copyToken">复制 Token</button>
+      </template>
+    </div>
+    <div v-if="toast.visible" :class="['toast', toast.type]">{{ toast.text }}</div>
+    <template v-if="view === 'auth'">
+      <section>
+        <h2>注册 / 登录</h2>
+        <div>
+          <input v-model="username" placeholder="用户名（至少3位）" />
+          <input v-model="password" type="password" placeholder="密码（至少6位）" />
+          <button @click="register">注册</button>
+          <button @click="login">登录</button>
+        </div>
+      </section>
+    </template>
+
+    <template v-else>
+      <section class="actions">
+        <h2>创建学生</h2>
+        <div>
+          <input v-model="name" placeholder="姓名" />
+          <input v-model.number="age" type="number" placeholder="年龄" />
+          <input v-model="className" placeholder="班级，如：高一(1)班" />
+          <input v-model="gender" placeholder="性别，可选" />
+          <button @click="createStudent">创建</button>
+          <button @click="logout">退出登录</button>
+        </div>
+      </section>
+
+      <h2>学生列表</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>姓名</th>
+            <th>性别</th>
+            <th>年龄</th>
+            <th>班级</th>
+            <th>创建时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="s in students" :key="s.id">
+            <td>{{ s.name }}</td>
+            <td>{{ s.gender ?? '' }}</td>
+            <td>{{ s.age ?? '' }}</td>
+            <td>{{ s.class_name ?? '' }}</td>
+            <td>{{ s.created_at }}</td>
+            <td><button @click="deleteStudent(s.id)">删除</button></td>
+          </tr>
+        </tbody>
+      </table>
+    </template>
+    <div class="actions">
+      <button @click="loadStudents">刷新列表</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>姓名</th>
+          <th>性别</th>
+          <th>年龄</th>
+          <th>班级</th>
+          <th>创建时间</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-for="s in students" :key="s.id">
+          <td>{{ s.id }}</td>
+          <td>{{ s.name }}</td>
+          <td>{{ s.gender ?? '' }}</td>
+          <td>{{ s.age ?? '' }}</td>
+          <td>{{ s.class_name ?? '' }}</td>
+          <td>{{ s.created_at }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    const { createApp, ref, onMounted } = Vue
+    createApp({
+      setup() {
+        const students = ref([])
+        const view = ref('auth')
+        const toast = ref({ visible: false, type: 'info', text: '' })
+        const showToast = (text, type = 'info', duration = 2000) => {
+          toast.value = { visible: true, type, text }
+          clearTimeout(showToast._t)
+          showToast._t = setTimeout(() => { toast.value.visible = false }, duration)
+        }
+        const username = ref("")
+        const password = ref("")
+        const token = ref("")
+        const name = ref("")
+        const age = ref()
+        const className = ref("")
+        const gender = ref("")
+        const msg = ref("")
+        const loadStudents = async () => {
+          const resp = await fetch('/api/students')
+          students.value = await resp.json()
+        }
+        const login = async () => {
+          msg.value = ""
+          const resp = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: username.value, password: password.value })
+          })
+          if (!resp.ok) {
+            const err = await resp.json().catch(() => ({ message: '登录失败' }))
+            showToast(err.message || '登录失败', 'error')
+            return
+          }
+          const data = await resp.json()
+          token.value = data.access_token
+          try { localStorage.setItem('token', token.value) } catch (e) {}
+          showToast('登录成功', 'success')
+          view.value = 'dashboard'
+          await loadStudents()
+        }
+        const register = async () => {
+          msg.value = ""
+          const resp = await fetch('/api/auth/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: username.value, password: password.value })
+          })
+          if (!resp.ok) {
+            const err = await resp.json().catch(() => ({ message: '注册失败' }))
+            showToast(err.message || '注册失败', 'error')
+            return
+          }
+          await login()
+          showToast('注册成功，已自动登录', 'success')
+        }
+        const logout = () => {
+          token.value = ''
+          try { localStorage.removeItem('token') } catch (e) {}
+          view.value = 'auth'
+          students.value = []
+        }
+        const createStudent = async () => {
+          msg.value = ""
+          if (!token.value) {
+            showToast('请先登录', 'error')
+            return
+          }
+          if (!name.value || !String(name.value).trim() || !className.value || !String(className.value).trim()) {
+            showToast('姓名和班级不能为空', 'error')
+            return
+          }
+          const resp = await fetch('/api/students', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token.value}`
+            },
+            body: JSON.stringify({ name: name.value, age: age.value, class_name: className.value, gender: gender.value || null })
+          })
+          if (!resp.ok) {
+            const err = await resp.json().catch(() => ({ message: '创建失败' }))
+            showToast(err.message || '创建失败', 'error')
+            return
+          }
+          const created = await resp.json()
+          students.value = [created, ...students.value]
+          name.value = ""
+          age.value = undefined
+          className.value = ""
+          gender.value = ""
+          showToast('创建成功', 'success')
+        }
+
+        const deleteStudent = async (id) => {
+          if (!token.value) {
+            showToast('请先登录', 'error')
+            return
+          }
+          const resp = await fetch(`/api/students/${id}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${token.value}` }
+          })
+          if (resp.status !== 204) {
+            const err = await resp.json().catch(() => ({ message: '删除失败' }))
+            showToast(err.message || '删除失败', 'error')
+            return
+          }
+          students.value = students.value.filter(s => s.id !== id)
+          showToast('删除成功', 'success')
+        }
+        const copyToken = async () => {
+          if (!token.value) { showToast('无可复制的令牌', 'error'); return }
+          try {
+            await navigator.clipboard.writeText(token.value)
+            showToast('令牌已复制', 'success')
+          } catch (e) {
+            const ta = document.createElement('textarea')
+            ta.value = token.value
+            document.body.appendChild(ta)
+            ta.select()
+            document.execCommand('copy')
+            document.body.removeChild(ta)
+            showToast('令牌已复制', 'success')
+          }
+        }
+
+        try {
+          const saved = localStorage.getItem('token')
+          if (saved) {
+            token.value = saved
+            view.value = 'dashboard'
+            loadStudents()
+          }
+        } catch (e) {}
+
+        return { students, loadStudents, username, password, token, name, age, className, gender, msg, view, toast, showToast, login, register, logout, createStudent, deleteStudent, copyToken }
+      }
+    }).mount('#app')
+  </script>
+</body>
+</html>
