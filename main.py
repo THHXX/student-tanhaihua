@@ -11,6 +11,7 @@ from crud.student_crud import get_students, get_student, create_student, update_
 from crud.user_crud import get_user_by_username, create_user
 from schemas import StudentCreate, StudentUpdate, StudentRead, UserCreate, UserRead, Token, LoginData
 from auth import get_password_hash, verify_password, create_access_token, get_current_user
+from sqlalchemy import inspect
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -33,6 +34,15 @@ async def root():
 @app.get("/api/health")
 async def health_check():
     return {"status": "healthy", "timestamp": "2024-01-01T10:00:00"}
+
+@app.get("/api/db/check")
+def db_check():
+    insp = inspect(engine)
+    return {
+        "dialect": engine.url.get_backend_name(),
+        "database": engine.url.database,
+        "tables": insp.get_table_names(),
+    }
 
 
 @app.exception_handler(RequestValidationError)
