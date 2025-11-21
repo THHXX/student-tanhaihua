@@ -1,8 +1,8 @@
 fastapi==0.121.3
-jose==1.0.0
 passlib==1.7.4
 pydantic==2.12.4
 SQLAlchemy==2.0.44
 starlette==0.50.0
 gunicorn==23.0.0
 uvicorn
+python-jose[cryptography]
