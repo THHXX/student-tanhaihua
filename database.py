@@ -4,7 +4,14 @@ from sqlalchemy import create_engine, Column, Integer, String, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from typing import Generator
 
-DATABASE_URL = os.environ.get("DATABASE_URL") or "sqlite:///./student_sms.sqlite3"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+if DATABASE_URL is None:
+    print("未找到云数据库环境变量，正在使用本地数据库...")
+    DATABASE_URL = "postgresql+psycopg2://user:password@localhost/student_db"
+
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 engine_args = {}
 if DATABASE_URL.startswith("sqlite"):
