@@ -7,3 +7,4 @@ gunicorn==23.0.0
 uvicorn
 python-jose[cryptography]
 psycopg2-binary
+boto3

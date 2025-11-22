@@ -44,6 +44,23 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 
+class Submission(Base):
+    __tablename__ = "submissions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    student_name = Column(String(50), nullable=False)
+    student_no = Column(String(50), nullable=False)
+    class_name = Column(String(50), nullable=False)
+    file_name = Column(String(255), nullable=False)
+    file_path = Column(String(255), nullable=False)
+    file_key = Column(String(255))
+    file_url = Column(String(512))
+    storage_provider = Column(String(50))
+    content_type = Column(String(100))
+    file_size = Column(Integer)
+    submitted_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:

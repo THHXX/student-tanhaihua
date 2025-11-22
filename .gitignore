@@ -1,0 +1,10 @@
+﻿venv/
+__pycache__/
+.pytest_cache/
+.idea/
+uploads/
+*.sqlite3
+*.log
+*.md
+tests/
+Python 全栈学习.txt
