@@ -13,6 +13,7 @@ from schemas import StudentCreate, StudentUpdate, StudentRead, UserCreate, UserR
 from schemas import SubmissionCreate, SubmissionRead
 from auth import get_password_hash, verify_password, create_access_token, get_current_user
 from sqlalchemy import inspect, text
+from botocore.config import Config
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -69,11 +70,14 @@ async def submit_form_post(
         if bucket:
             endpoint = os.getenv("S3_ENDPOINT_URL")
             region = os.getenv("AWS_REGION")
-            s3 = boto3.client("s3",
-                               aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                               aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                               region_name=region,
-                               endpoint_url=endpoint or None)
+            s3 = boto3.client(
+                "s3",
+                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                region_name=region or "auto",
+                endpoint_url=endpoint or None,
+                config=Config(signature_version="s3v4"),
+            )
             ext = os.path.splitext(file.filename)[1] or ""
             key = f"submissions/{uuid.uuid4().hex}{ext}"
             s3.put_object(Bucket=bucket, Key=key, Body=data, ContentType=file.content_type)
@@ -131,11 +135,14 @@ async def create_submission(
     if bucket:
         endpoint = os.getenv("S3_ENDPOINT_URL")
         region = os.getenv("AWS_REGION")
-        s3 = boto3.client("s3",
-                           aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                           aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                           region_name=region,
-                           endpoint_url=endpoint or None)
+        s3 = boto3.client(
+            "s3",
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+            region_name=region or "auto",
+            endpoint_url=endpoint or None,
+            config=Config(signature_version="s3v4"),
+        )
         ext = os.path.splitext(file.filename)[1] or ""
         key = f"submissions/{uuid.uuid4().hex}{ext}"
         s3.put_object(Bucket=bucket, Key=key, Body=data, ContentType=file.content_type)
@@ -174,11 +181,14 @@ def export_zip(db: Session = Depends(get_db)):
     if bucket:
         endpoint = os.getenv("S3_ENDPOINT_URL")
         region = os.getenv("AWS_REGION")
-        s3 = boto3.client("s3",
-                           aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                           aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                           region_name=region,
-                           endpoint_url=endpoint or None)
+        s3 = boto3.client(
+            "s3",
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+            region_name=region or "auto",
+            endpoint_url=endpoint or None,
+            config=Config(signature_version="s3v4"),
+        )
     for it in items:
         if bucket and it.file_key:
             resp = s3.get_object(Bucket=bucket, Key=it.file_key)
@@ -204,14 +214,23 @@ def download_submission_file(submission_id: int, db: Session = Depends(get_db)):
     if bucket and obj.file_key:
         endpoint = os.getenv("S3_ENDPOINT_URL")
         region = os.getenv("AWS_REGION")
-        s3 = boto3.client("s3",
-                           aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                           aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                           region_name=region,
-                           endpoint_url=endpoint or None)
-        resp = s3.get_object(Bucket=bucket, Key=obj.file_key)
-        body = resp["Body"].read()
-        return StreamingResponse(iter([body]), media_type=obj.content_type, headers={"Content-Disposition": f"attachment; filename={obj.file_name}"})
+        s3 = boto3.client(
+            "s3",
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+            region_name=region or "auto",
+            endpoint_url=endpoint or None,
+            config=Config(signature_version="s3v4"),
+        )
+        try:
+            resp = s3.get_object(Bucket=bucket, Key=obj.file_key)
+            body = resp["Body"].read()
+            return StreamingResponse(iter([body]), media_type=obj.content_type, headers={"Content-Disposition": f"attachment; filename={obj.file_name}"})
+        except Exception:
+            raise HTTPException(status_code=502, detail="STORAGE_READ_ERROR")
+    import os
+    if not os.path.isfile(obj.file_path):
+        raise HTTPException(status_code=404)
     return FileResponse(obj.file_path, media_type=obj.content_type, filename=obj.file_name)
 
 
