@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Request, UploadFile, File, Form
 from contextlib import asynccontextmanager
 from starlette.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse, RedirectResponse
 from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.responses import JSONResponse
@@ -76,7 +76,7 @@ async def submit_form_post(
                 aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
                 region_name=region or "auto",
                 endpoint_url=endpoint or None,
-                config=Config(signature_version="s3v4"),
+                config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
             )
             ext = os.path.splitext(file.filename)[1] or ""
             key = f"submissions/{uuid.uuid4().hex}{ext}"
@@ -141,7 +141,7 @@ async def create_submission(
             aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
             region_name=region or "auto",
             endpoint_url=endpoint or None,
-            config=Config(signature_version="s3v4"),
+            config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
         )
         ext = os.path.splitext(file.filename)[1] or ""
         key = f"submissions/{uuid.uuid4().hex}{ext}"
@@ -187,7 +187,7 @@ def export_zip(db: Session = Depends(get_db)):
             aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
             region_name=region or "auto",
             endpoint_url=endpoint or None,
-            config=Config(signature_version="s3v4"),
+            config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
         )
     for it in items:
         if bucket and it.file_key:
@@ -220,14 +220,22 @@ def download_submission_file(submission_id: int, db: Session = Depends(get_db)):
             aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
             region_name=region or "auto",
             endpoint_url=endpoint or None,
-            config=Config(signature_version="s3v4"),
+            config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
         )
         try:
             resp = s3.get_object(Bucket=bucket, Key=obj.file_key)
             body = resp["Body"].read()
             return StreamingResponse(iter([body]), media_type=obj.content_type, headers={"Content-Disposition": f"attachment; filename={obj.file_name}"})
         except Exception:
-            raise HTTPException(status_code=502, detail="STORAGE_READ_ERROR")
+            try:
+                u = s3.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": bucket, "Key": obj.file_key},
+                    ExpiresIn=300,
+                )
+                return RedirectResponse(url=u, status_code=302)
+            except Exception:
+                raise HTTPException(status_code=502, detail="STORAGE_READ_ERROR")
     import os
     if not os.path.isfile(obj.file_path):
         raise HTTPException(status_code=404)
