@@ -9,10 +9,8 @@ from sqlalchemy.orm import Session
 from database import Base, engine, get_db, Submission, Folder
 from schemas import SubmissionCreate, SubmissionRead, ErrorResponse
 from sqlalchemy import inspect, text
-from botocore.config import Config
 import os
 import uuid
-import boto3
 from pathlib import Path
 import io
 import zipfile
@@ -21,20 +19,6 @@ import urllib.parse
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
-    insp = inspect(engine)
-    try:
-        cols = [c['name'] for c in insp.get_columns('submissions')]
-        with engine.begin() as conn:
-            if 'class_name' not in cols:
-                conn.execute(text('ALTER TABLE submissions ADD COLUMN class_name VARCHAR(50)'))
-            if 'file_key' not in cols:
-                conn.execute(text('ALTER TABLE submissions ADD COLUMN file_key VARCHAR(255)'))
-            if 'file_url' not in cols:
-                conn.execute(text('ALTER TABLE submissions ADD COLUMN file_url VARCHAR(512)'))
-            if 'storage_provider' not in cols:
-                conn.execute(text('ALTER TABLE submissions ADD COLUMN storage_provider VARCHAR(50)'))
-    except Exception:
-        pass
     yield
 
 app = FastAPI(title="学生管理系统", version="1.0.0", lifespan=lifespan)
@@ -121,12 +105,49 @@ def index(db: Session = Depends(get_db)):
         """
     
     if not folders:
-        folder_html = "<div class='empty-state'>暂无文件夹，请先创建一个。</div>"
+        folder_html = "<div class='empty-state'>暂无文件夹。</div>"
 
     content = f"""
     <div class="header">
         <h1>作业管理系统</h1>
         <a href="/submit" class="btn">我要交作业</a>
+    </div>
+    
+    <h3>文件夹列表</h3>
+    <div class="folder-grid">
+        {folder_html}
+    </div>
+    """
+    return render_base(content)
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_index(db: Session = Depends(get_db)):
+    folders = db.query(Folder).order_by(Folder.created_at.desc()).all()
+    
+    folder_html = ""
+    for f in folders:
+        # Count submissions
+        count = db.query(Submission).filter(Submission.class_name == f.name).count()
+        folder_html += f"""
+        <div style="position: relative;">
+            <a href="/admin/folders/{f.id}" class="folder-card">
+                <span class="folder-icon">📁</span>
+                <span class="folder-name">{f.name}</span>
+                <span class="folder-count">{count} 份作业</span>
+            </a>
+            <form action="/folders/{f.id}/delete" method="post" onsubmit="return confirm('确定要删除文件夹 【{f.name}】 吗？\\n注意：删除后文件夹内的作业可能无法分类！');" style="position: absolute; top: 10px; right: 10px; z-index: 10;">
+                <button type="submit" title="删除文件夹" style="background: rgba(255, 255, 255, 0.9); border: 1px solid #ffcccc; color: #dc3545; width: 28px; height: 28px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 16px; transition: all 0.2s; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">×</button>
+            </form>
+        </div>
+        """
+    
+    if not folders:
+        folder_html = "<div class='empty-state'>暂无文件夹，请先创建一个。</div>"
+
+    content = f"""
+    <div class="header">
+        <h1>作业管理系统 (管理员)</h1>
+        <a href="/" class="btn btn-secondary">返回首页</a>
     </div>
     
     <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 30px;">
@@ -137,12 +158,12 @@ def index(db: Session = Depends(get_db)):
         </form>
     </div>
 
-    <h3>文件夹列表</h3>
+    <h3>文件夹列表 (管理模式)</h3>
     <div class="folder-grid">
         {folder_html}
     </div>
     """
-    return render_base(content)
+    return render_base(content, title="管理员控制台")
 
 @app.post("/folders/create", response_class=HTMLResponse)
 def create_folder(name: str = Form(...), db: Session = Depends(get_db)):
@@ -152,15 +173,70 @@ def create_folder(name: str = Form(...), db: Session = Depends(get_db)):
     
     existing = db.query(Folder).filter(Folder.name == name).first()
     if existing:
-        return RedirectResponse(url="/?error=exists", status_code=303)
+        return RedirectResponse(url="/admin?error=exists", status_code=303)
         
     new_folder = Folder(name=name)
     db.add(new_folder)
     db.commit()
-    return RedirectResponse(url="/", status_code=303)
+    return RedirectResponse(url="/admin", status_code=303)
 
 @app.get("/folders/{folder_id}", response_class=HTMLResponse)
 def view_folder(folder_id: int, db: Session = Depends(get_db)):
+    # Student View: No download links, no delete buttons
+    folder = db.query(Folder).filter(Folder.id == folder_id).first()
+    if not folder:
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+    
+    submissions = db.query(Submission).filter(Submission.class_name == folder.name).order_by(Submission.submitted_at.desc()).all()
+    
+    rows = ""
+    for sub in submissions:
+        time_str = sub.submitted_at.strftime("%Y-%m-%d %H:%M")
+        rows += f"""
+        <tr>
+            <td>{sub.student_name}</td>
+            <td>{sub.student_no}</td>
+            <td>{time_str}</td>
+            <td><span style="color: #888;">已提交</span></td>
+        </tr>
+        """
+    
+    if not submissions:
+        rows = "<tr><td colspan='4' class='empty-state'>该文件夹下暂无作业</td></tr>"
+
+    content = f"""
+    <div class="breadcrumb">
+        <a href="/">首页</a> <span>/</span> {folder.name}
+    </div>
+
+    <div class="header">
+        <h2>{folder.name}</h2>
+        <div class="actions-bar">
+            <a href="/submit?folder_id={folder.id}" class="btn">在此提交作业</a>
+        </div>
+    </div>
+
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>姓名</th>
+                    <th>学号</th>
+                    <th>提交时间</th>
+                    <th>状态</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows}
+            </tbody>
+        </table>
+    </div>
+    """
+    return render_base(content, title=folder.name)
+
+@app.get("/admin/folders/{folder_id}", response_class=HTMLResponse)
+def view_folder_admin(folder_id: int, db: Session = Depends(get_db)):
+    # Admin View: Full access
     folder = db.query(Folder).filter(Folder.id == folder_id).first()
     if not folder:
         raise HTTPException(status_code=404, detail="文件夹不存在")
@@ -185,11 +261,11 @@ def view_folder(folder_id: int, db: Session = Depends(get_db)):
 
     content = f"""
     <div class="breadcrumb">
-        <a href="/">首页</a> <span>/</span> {folder.name}
+        <a href="/admin">管理首页</a> <span>/</span> {folder.name}
     </div>
 
     <div class="header">
-        <h2>{folder.name}</h2>
+        <h2>{folder.name} (管理)</h2>
         <div class="actions-bar">
             <a href="/submit?folder_id={folder.id}" class="btn">在此提交作业</a>
             <a href="/folders/{folder.id}/download" class="btn btn-success">📦 打包下载全部</a>
@@ -218,7 +294,7 @@ def view_folder(folder_id: int, db: Session = Depends(get_db)):
         </form>
     </div>
     """
-    return render_base(content, title=folder.name)
+    return render_base(content, title=f"{folder.name} - 管理")
 
 @app.post("/folders/{folder_id}/delete")
 def delete_folder(folder_id: int, db: Session = Depends(get_db)):
@@ -226,7 +302,7 @@ def delete_folder(folder_id: int, db: Session = Depends(get_db)):
     if folder:
         db.delete(folder)
         db.commit()
-    return RedirectResponse(url="/", status_code=303)
+    return RedirectResponse(url="/admin", status_code=303)
 
 @app.get("/folders/{folder_id}/download")
 def download_folder_zip(folder_id: int, db: Session = Depends(get_db)):
@@ -238,34 +314,14 @@ def download_folder_zip(folder_id: int, db: Session = Depends(get_db)):
     
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        # S3 Setup
-        bucket = os.getenv("S3_BUCKET")
-        s3 = None
-        if bucket:
-            endpoint = os.getenv("S3_ENDPOINT_URL")
-            region = os.getenv("AWS_REGION")
-            s3 = boto3.client(
-                "s3",
-                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                region_name=region or "auto",
-                endpoint_url=endpoint or None,
-                config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
-            )
-
         for sub in submissions:
             # Create a unique name inside zip: Name_No_Filename
             zip_name = f"{sub.student_name}_{sub.student_no}_{sub.file_name}"
             
             try:
-                if bucket and sub.file_key:
-                    resp = s3.get_object(Bucket=bucket, Key=sub.file_key)
-                    data = resp["Body"].read()
-                    zf.writestr(zip_name, data)
-                else:
-                    if os.path.isfile(sub.file_path):
-                        with open(sub.file_path, "rb") as f:
-                            zf.writestr(zip_name, f.read())
+                if os.path.isfile(sub.file_path):
+                    with open(sub.file_path, "rb") as f:
+                        zf.writestr(zip_name, f.read())
             except Exception as e:
                 print(f"Error zipping {sub.id}: {e}")
                 pass
@@ -334,42 +390,17 @@ async def submit_form_post(
     try:
         # File Saving Logic
         data = await file.read()
-        bucket = os.getenv("S3_BUCKET")
         
         file_path = ""
-        file_key = ""
-        file_url = ""
         storage_provider = "local"
 
-        if bucket:
-            endpoint = os.getenv("S3_ENDPOINT_URL")
-            region = os.getenv("AWS_REGION")
-            s3 = boto3.client(
-                "s3",
-                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                region_name=region or "auto",
-                endpoint_url=endpoint or None,
-                config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
-            )
-            ext = os.path.splitext(file.filename)[1] or ""
-            key = f"submissions/{uuid.uuid4().hex}{ext}"
-            s3.put_object(Bucket=bucket, Key=key, Body=data, ContentType=file.content_type)
-            url = (endpoint.rstrip("/") + f"/{bucket}/{key}") if endpoint else f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
-            
-            file_path = key
-            file_key = key
-            file_url = url
-            storage_provider = "custom" if endpoint else "aws"
-        else:
-            Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
-            ext = os.path.splitext(file.filename)[1] or ""
-            safe = f"{uuid.uuid4().hex}{ext}"
-            dest = Path(UPLOAD_DIR) / safe
-            dest.write_bytes(data)
-            
-            file_path = str(dest)
-            storage_provider = "local"
+        Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
+        ext = os.path.splitext(file.filename)[1] or ""
+        safe = f"{uuid.uuid4().hex}{ext}"
+        dest = Path(UPLOAD_DIR) / safe
+        dest.write_bytes(data)
+        
+        file_path = str(dest)
 
         obj = Submission(
             student_name=student_name, 
@@ -377,8 +408,8 @@ async def submit_form_post(
             class_name=class_name,
             file_name=file.filename, 
             file_path=file_path, 
-            file_key=file_key, 
-            file_url=file_url,
+            file_key="", 
+            file_url="",
             storage_provider=storage_provider,
             content_type=file.content_type, 
             file_size=len(data)
@@ -402,28 +433,6 @@ def download_submission_file(submission_id: int, db: Session = Depends(get_db)):
     if not obj:
         raise HTTPException(status_code=404)
     
-    # Check S3
-    bucket = os.getenv("S3_BUCKET")
-    if bucket and obj.file_key:
-        try:
-            endpoint = os.getenv("S3_ENDPOINT_URL")
-            region = os.getenv("AWS_REGION")
-            s3 = boto3.client(
-                "s3",
-                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                region_name=region or "auto",
-                endpoint_url=endpoint or None,
-                config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
-            )
-            resp = s3.get_object(Bucket=bucket, Key=obj.file_key)
-            body = resp["Body"].read()
-            filename = urllib.parse.quote(obj.file_name)
-            return StreamingResponse(iter([body]), media_type=obj.content_type, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"})
-        except Exception:
-             # Fallback or error
-             pass
-
     # Local file
     if not os.path.isfile(obj.file_path):
         raise HTTPException(status_code=404, detail="文件未找到")

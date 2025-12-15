@@ -5,5 +5,4 @@ starlette==0.50.0
 gunicorn==23.0.0
 uvicorn
 psycopg2-binary
-boto3
 python-multipart
