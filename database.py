@@ -23,27 +23,6 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
-class Student(Base):
-    __tablename__ = "students"
-
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(50), nullable=False)
-    gender = Column(String(10))
-    age = Column(Integer)
-    class_name = Column(String(50))
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
-
-
-class User(Base):
-    __tablename__ = "users"
-
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String(50), unique=True, index=True, nullable=False)
-    hashed_password = Column(String(128), nullable=False)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-
-
 class Submission(Base):
     __tablename__ = "submissions"
 
@@ -59,6 +38,14 @@ class Submission(Base):
     content_type = Column(String(100))
     file_size = Column(Integer)
     submitted_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+class Folder(Base):
+    __tablename__ = "folders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(50), unique=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 
 def get_db() -> Generator[Session, None, None]:

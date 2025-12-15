@@ -1,18 +1,22 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Request, UploadFile, File, Form
 from contextlib import asynccontextmanager
 from starlette.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse, RedirectResponse
 from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.responses import JSONResponse
 from sqlalchemy.orm import Session
-from database import Base, engine, get_db, Submission
-from crud.student_crud import get_students, get_student, create_student, update_student, delete_student
-from crud.user_crud import get_user_by_username, create_user
-from schemas import StudentCreate, StudentUpdate, StudentRead, UserCreate, UserRead, Token, LoginData
-from schemas import SubmissionCreate, SubmissionRead
-from auth import get_password_hash, verify_password, create_access_token, get_current_user
+from database import Base, engine, get_db, Submission, Folder
+from schemas import SubmissionCreate, SubmissionRead, ErrorResponse
 from sqlalchemy import inspect, text
+from botocore.config import Config
+import os
+import uuid
+import boto3
+from pathlib import Path
+import io
+import zipfile
+import urllib.parse
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -37,21 +41,287 @@ app = FastAPI(title="学生管理系统", version="1.0.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 UPLOAD_DIR = "uploads"
 
-@app.get("/submit", response_class=HTMLResponse)
-def submit_form():
-    return """
-    <html><head><meta charset='utf-8'><title>提交作业</title></head>
+# --- UI Helper ---
+def render_base(content, title="作业管理系统"):
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset='utf-8'>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>{title}</title>
+        <style>
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background: #f0f2f5; color: #333; }}
+            .container {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }}
+            h1, h2, h3 {{ color: #1a1a1a; margin-top: 0; }}
+            .header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 15px; }}
+            .btn {{ display: inline-flex; align-items: center; justify-content: center; padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 6px; border: none; cursor: pointer; font-size: 14px; transition: all 0.2s; font-weight: 500; }}
+            .btn:hover {{ background: #0069d9; transform: translateY(-1px); }}
+            .btn-sm {{ padding: 6px 12px; font-size: 13px; }}
+            .btn-danger {{ background: #dc3545; }}
+            .btn-danger:hover {{ background: #c82333; }}
+            .btn-success {{ background: #28a745; }}
+            .btn-success:hover {{ background: #218838; }}
+            .btn-secondary {{ background: #6c757d; }}
+            .btn-secondary:hover {{ background: #5a6268; }}
+            
+            .folder-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 20px; margin-top: 20px; }}
+            .folder-card {{ border: 1px solid #eaeaea; padding: 20px; border-radius: 10px; background: #fff; text-align: center; transition: all 0.3s ease; text-decoration: none; color: inherit; display: block; position: relative; overflow: hidden; }}
+            .folder-card:hover {{ transform: translateY(-5px); box-shadow: 0 10px 20px rgba(0,0,0,0.1); border-color: #007bff; }}
+            .folder-icon {{ font-size: 50px; color: #ffc107; margin-bottom: 10px; display: block; }}
+            .folder-name {{ font-weight: 600; font-size: 16px; display: block; margin-bottom: 5px; }}
+            .folder-count {{ font-size: 12px; color: #888; }}
+            
+            .table-container {{ overflow-x: auto; }}
+            table {{ width: 100%; border-collapse: collapse; margin-top: 15px; background: white; }}
+            th, td {{ padding: 12px 15px; text-align: left; border-bottom: 1px solid #eee; }}
+            th {{ background: #f8f9fa; font-weight: 600; color: #555; white-space: nowrap; }}
+            tr:hover {{ background-color: #f8f9fa; }}
+            
+            .form-group {{ margin-bottom: 20px; }}
+            label {{ display: block; margin-bottom: 8px; font-weight: 600; color: #555; }}
+            input, select {{ width: 100%; padding: 10px; box-sizing: border-box; border: 1px solid #ddd; border-radius: 6px; font-size: 16px; transition: border-color 0.2s; }}
+            input:focus, select:focus {{ border-color: #007bff; outline: none; }}
+            
+            .breadcrumb {{ margin-bottom: 20px; font-size: 14px; color: #666; }}
+            .breadcrumb a {{ color: #007bff; text-decoration: none; }}
+            .breadcrumb span {{ margin: 0 5px; color: #ccc; }}
+            
+            .actions-bar {{ display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }}
+            .empty-state {{ text-align: center; padding: 40px; color: #888; font-style: italic; }}
+            
+            .flash-message {{ padding: 15px; background: #d4edda; color: #155724; border-radius: 6px; margin-bottom: 20px; border: 1px solid #c3e6cb; }}
+            .flash-error {{ background: #f8d7da; color: #721c24; border-color: #f5c6cb; }}
+        </style>
+    </head>
     <body>
-      <h2>提交作业</h2>
-      <form method="post" action="/submit" enctype="multipart/form-data">
-        姓名：<input name="student_name" required><br>
-        学号：<input name="student_no" required><br>
-        班级：<input name="class_name" required><br>
-        文件：<input type="file" name="file" required><br>
-        <button type="submit">提交</button>
-      </form>
-    </body></html>
+        <div class="container">
+            {content}
+        </div>
+    </body>
+    </html>
     """
+
+# --- Routes ---
+
+@app.get("/", response_class=HTMLResponse)
+def index(db: Session = Depends(get_db)):
+    folders = db.query(Folder).order_by(Folder.created_at.desc()).all()
+    
+    folder_html = ""
+    for f in folders:
+        # Count submissions
+        count = db.query(Submission).filter(Submission.class_name == f.name).count()
+        folder_html += f"""
+        <a href="/folders/{f.id}" class="folder-card">
+            <span class="folder-icon">📁</span>
+            <span class="folder-name">{f.name}</span>
+            <span class="folder-count">{count} 份作业</span>
+        </a>
+        """
+    
+    if not folders:
+        folder_html = "<div class='empty-state'>暂无文件夹，请先创建一个。</div>"
+
+    content = f"""
+    <div class="header">
+        <h1>作业管理系统</h1>
+        <a href="/submit" class="btn">我要交作业</a>
+    </div>
+    
+    <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 30px;">
+        <h3>新建文件夹 (课程/科目)</h3>
+        <form action="/folders/create" method="post" style="display: flex; gap: 10px;">
+            <input type="text" name="name" placeholder="例如：高等数学、马克思主义原理" required style="flex: 1;">
+            <button type="submit" class="btn btn-success">创建</button>
+        </form>
+    </div>
+
+    <h3>文件夹列表</h3>
+    <div class="folder-grid">
+        {folder_html}
+    </div>
+    """
+    return render_base(content)
+
+@app.post("/folders/create", response_class=HTMLResponse)
+def create_folder(name: str = Form(...), db: Session = Depends(get_db)):
+    name = name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="名称不能为空")
+    
+    existing = db.query(Folder).filter(Folder.name == name).first()
+    if existing:
+        return RedirectResponse(url="/?error=exists", status_code=303)
+        
+    new_folder = Folder(name=name)
+    db.add(new_folder)
+    db.commit()
+    return RedirectResponse(url="/", status_code=303)
+
+@app.get("/folders/{folder_id}", response_class=HTMLResponse)
+def view_folder(folder_id: int, db: Session = Depends(get_db)):
+    folder = db.query(Folder).filter(Folder.id == folder_id).first()
+    if not folder:
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+    
+    submissions = db.query(Submission).filter(Submission.class_name == folder.name).order_by(Submission.submitted_at.desc()).all()
+    
+    rows = ""
+    for sub in submissions:
+        file_url = f"/api/submissions/{sub.id}/file"
+        time_str = sub.submitted_at.strftime("%Y-%m-%d %H:%M")
+        rows += f"""
+        <tr>
+            <td>{sub.student_name}</td>
+            <td>{sub.student_no}</td>
+            <td>{time_str}</td>
+            <td><a href="{file_url}" class="btn btn-sm btn-secondary" target="_blank">下载文件</a></td>
+        </tr>
+        """
+    
+    if not submissions:
+        rows = "<tr><td colspan='4' class='empty-state'>该文件夹下暂无作业</td></tr>"
+
+    content = f"""
+    <div class="breadcrumb">
+        <a href="/">首页</a> <span>/</span> {folder.name}
+    </div>
+
+    <div class="header">
+        <h2>{folder.name}</h2>
+        <div class="actions-bar">
+            <a href="/submit?folder_id={folder.id}" class="btn">在此提交作业</a>
+            <a href="/folders/{folder.id}/download" class="btn btn-success">📦 打包下载全部</a>
+        </div>
+    </div>
+
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>姓名</th>
+                    <th>学号</th>
+                    <th>提交时间</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows}
+            </tbody>
+        </table>
+    </div>
+
+    <div style="margin-top: 50px; border-top: 1px solid #eee; padding-top: 20px;">
+        <form action="/folders/{folder.id}/delete" method="post" onsubmit="return confirm('确定要删除这个文件夹吗？删除后文件夹内的记录可能无法分类！');">
+            <button type="submit" class="btn btn-danger btn-sm">删除此文件夹</button>
+        </form>
+    </div>
+    """
+    return render_base(content, title=folder.name)
+
+@app.post("/folders/{folder_id}/delete")
+def delete_folder(folder_id: int, db: Session = Depends(get_db)):
+    folder = db.query(Folder).filter(Folder.id == folder_id).first()
+    if folder:
+        db.delete(folder)
+        db.commit()
+    return RedirectResponse(url="/", status_code=303)
+
+@app.get("/folders/{folder_id}/download")
+def download_folder_zip(folder_id: int, db: Session = Depends(get_db)):
+    folder = db.query(Folder).filter(Folder.id == folder_id).first()
+    if not folder:
+        raise HTTPException(status_code=404)
+    
+    submissions = db.query(Submission).filter(Submission.class_name == folder.name).all()
+    
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # S3 Setup
+        bucket = os.getenv("S3_BUCKET")
+        s3 = None
+        if bucket:
+            endpoint = os.getenv("S3_ENDPOINT_URL")
+            region = os.getenv("AWS_REGION")
+            s3 = boto3.client(
+                "s3",
+                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                region_name=region or "auto",
+                endpoint_url=endpoint or None,
+                config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+            )
+
+        for sub in submissions:
+            # Create a unique name inside zip: Name_No_Filename
+            zip_name = f"{sub.student_name}_{sub.student_no}_{sub.file_name}"
+            
+            try:
+                if bucket and sub.file_key:
+                    resp = s3.get_object(Bucket=bucket, Key=sub.file_key)
+                    data = resp["Body"].read()
+                    zf.writestr(zip_name, data)
+                else:
+                    if os.path.isfile(sub.file_path):
+                        with open(sub.file_path, "rb") as f:
+                            zf.writestr(zip_name, f.read())
+            except Exception as e:
+                print(f"Error zipping {sub.id}: {e}")
+                pass
+                
+    buf.seek(0)
+    filename = urllib.parse.quote(f"{folder.name}_作业打包.zip")
+    return StreamingResponse(
+        buf, 
+        media_type="application/zip", 
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"}
+    )
+
+@app.get("/submit", response_class=HTMLResponse)
+def submit_form(folder_id: int = None, db: Session = Depends(get_db)):
+    folders = db.query(Folder).all()
+    options = ""
+    for f in folders:
+        selected = "selected" if folder_id and f.id == folder_id else ""
+        options += f'<option value="{f.name}" {selected}>{f.name}</option>'
+    
+    if not folders:
+        options = '<option value="" disabled>请先在首页创建文件夹</option>'
+
+    content = f"""
+    <div class="header">
+        <h2>提交作业</h2>
+        <a href="/" class="btn btn-secondary btn-sm">返回首页</a>
+    </div>
+    
+    <form method="post" action="/submit" enctype="multipart/form-data" style="max-width: 500px; margin: 0 auto;">
+        <div class="form-group">
+            <label>提交到文件夹 (科目/班级)</label>
+            <select name="class_name" required>
+                {options}
+            </select>
+        </div>
+        
+        <div class="form-group">
+            <label>姓名</label>
+            <input name="student_name" required placeholder="请输入你的名字">
+        </div>
+        
+        <div class="form-group">
+            <label>学号</label>
+            <input name="student_no" required placeholder="请输入你的学号">
+        </div>
+        
+        <div class="form-group">
+            <label>作业文件</label>
+            <input type="file" name="file" required style="border: 1px dashed #ccc; padding: 20px; background: #fafafa;">
+        </div>
+        
+        <button type="submit" class="btn btn-success" style="width: 100%; margin-top: 10px;">🚀 确认提交</button>
+    </form>
+    """
+    return render_base(content, title="提交作业")
 
 @app.post("/submit", response_class=HTMLResponse)
 async def submit_form_post(
@@ -62,225 +332,106 @@ async def submit_form_post(
     db: Session = Depends(get_db),
 ):
     try:
-        import os, uuid, boto3
-        from pathlib import Path
+        # File Saving Logic
         data = await file.read()
         bucket = os.getenv("S3_BUCKET")
+        
+        file_path = ""
+        file_key = ""
+        file_url = ""
+        storage_provider = "local"
+
         if bucket:
             endpoint = os.getenv("S3_ENDPOINT_URL")
             region = os.getenv("AWS_REGION")
-            s3 = boto3.client("s3",
-                               aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                               aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                               region_name=region,
-                               endpoint_url=endpoint or None)
+            s3 = boto3.client(
+                "s3",
+                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                region_name=region or "auto",
+                endpoint_url=endpoint or None,
+                config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+            )
             ext = os.path.splitext(file.filename)[1] or ""
             key = f"submissions/{uuid.uuid4().hex}{ext}"
             s3.put_object(Bucket=bucket, Key=key, Body=data, ContentType=file.content_type)
             url = (endpoint.rstrip("/") + f"/{bucket}/{key}") if endpoint else f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
-            obj = Submission(student_name=student_name, student_no=student_no, class_name=class_name,
-                             file_name=file.filename, file_path=key, file_key=key, file_url=url,
-                             storage_provider=("custom" if endpoint else "aws"),
-                             content_type=file.content_type, file_size=len(data))
+            
+            file_path = key
+            file_key = key
+            file_url = url
+            storage_provider = "custom" if endpoint else "aws"
         else:
             Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
             ext = os.path.splitext(file.filename)[1] or ""
             safe = f"{uuid.uuid4().hex}{ext}"
             dest = Path(UPLOAD_DIR) / safe
             dest.write_bytes(data)
-            obj = Submission(student_name=student_name, student_no=student_no, class_name=class_name,
-                             file_name=file.filename, file_path=str(dest),
-                             content_type=file.content_type, file_size=len(data))
+            
+            file_path = str(dest)
+            storage_provider = "local"
+
+        obj = Submission(
+            student_name=student_name, 
+            student_no=student_no, 
+            class_name=class_name,
+            file_name=file.filename, 
+            file_path=file_path, 
+            file_key=file_key, 
+            file_url=file_url,
+            storage_provider=storage_provider,
+            content_type=file.content_type, 
+            file_size=len(data)
+        )
         db.add(obj)
         db.commit()
-        return f"<p>提交成功，编号 {obj.id}</p>"
-    except Exception as e:
-        return f"<p>提交失败：{e}</p>"
-
-
-@app.get("/")
-async def root():
-    return {"message": "作业提交服务已启动！"}
-
-
-@app.get("/api/health")
-async def health_check():
-    return {"status": "healthy", "timestamp": "2024-01-01T10:00:00"}
-
-@app.get("/api/db/check")
-def db_check():
-    insp = inspect(engine)
-    return {
-        "dialect": engine.url.get_backend_name(),
-        "database": engine.url.database,
-        "tables": insp.get_table_names(),
-    }
-
-@app.post("/api/submissions", response_model=SubmissionRead)
-async def create_submission(
-    student_name: str = Form(...),
-    student_no: str = Form(...),
-    class_name: str = Form(...),
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-):
-    import os, uuid, boto3
-    from pathlib import Path
-    data = await file.read()
-    bucket = os.getenv("S3_BUCKET")
-    if bucket:
-        endpoint = os.getenv("S3_ENDPOINT_URL")
-        region = os.getenv("AWS_REGION")
-        s3 = boto3.client("s3",
-                           aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                           aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                           region_name=region,
-                           endpoint_url=endpoint or None)
-        ext = os.path.splitext(file.filename)[1] or ""
-        key = f"submissions/{uuid.uuid4().hex}{ext}"
-        s3.put_object(Bucket=bucket, Key=key, Body=data, ContentType=file.content_type)
-        url = (endpoint.rstrip("/") + f"/{bucket}/{key}") if endpoint else f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
-        obj = Submission(student_name=student_name, student_no=student_no, class_name=class_name,
-                         file_name=file.filename, file_path=key, file_key=key, file_url=url,
-                         storage_provider=("custom" if endpoint else "aws"),
-                         content_type=file.content_type, file_size=len(data))
-    else:
-        Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
-        ext = os.path.splitext(file.filename)[1] or ""
-        safe = f"{uuid.uuid4().hex}{ext}"
-        dest = Path(UPLOAD_DIR) / safe
-        dest.write_bytes(data)
-        obj = Submission(student_name=student_name, student_no=student_no, class_name=class_name,
-                         file_name=file.filename, file_path=str(dest),
-                         content_type=file.content_type, file_size=len(data))
-    db.add(obj)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-@app.get("/api/submissions", response_model=list[SubmissionRead])
-def list_submissions(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    q = db.query(Submission)
-    return q.order_by(Submission.id.desc()).offset(skip).limit(limit).all()
-
-@app.get("/api/submissions/export-zip")
-def export_zip(db: Session = Depends(get_db)):
-    import io, zipfile, os, boto3
-    items = db.query(Submission).order_by(Submission.id.asc()).all()
-    buf = io.BytesIO()
-    zf = zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED)
-    bucket = os.getenv("S3_BUCKET")
-    s3 = None
-    if bucket:
-        endpoint = os.getenv("S3_ENDPOINT_URL")
-        region = os.getenv("AWS_REGION")
-        s3 = boto3.client("s3",
-                           aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                           aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                           region_name=region,
-                           endpoint_url=endpoint or None)
-    for it in items:
-        if bucket and it.file_key:
-            resp = s3.get_object(Bucket=bucket, Key=it.file_key)
-            data = resp["Body"].read()
-            zf.writestr(it.file_name, data)
+        
+        # Find folder ID to redirect
+        folder = db.query(Folder).filter(Folder.name == class_name).first()
+        if folder:
+            return RedirectResponse(url=f"/folders/{folder.id}", status_code=303)
         else:
-            try:
-                with open(it.file_path, "rb") as f:
-                    zf.writestr(it.file_name, f.read())
-            except Exception:
-                pass
-    zf.close()
-    buf.seek(0)
-    return StreamingResponse(buf, media_type="application/zip", headers={"Content-Disposition": "attachment; filename=submissions.zip"})
+            return RedirectResponse(url="/", status_code=303)
+
+    except Exception as e:
+        return render_base(f"<div class='flash-error'>提交失败：{str(e)}</div><a href='/submit' class='btn'>重试</a>")
 
 @app.get("/api/submissions/{submission_id}/file")
 def download_submission_file(submission_id: int, db: Session = Depends(get_db)):
-    import os, boto3
     obj = db.query(Submission).filter(Submission.id == submission_id).first()
     if not obj:
         raise HTTPException(status_code=404)
+    
+    # Check S3
     bucket = os.getenv("S3_BUCKET")
     if bucket and obj.file_key:
-        endpoint = os.getenv("S3_ENDPOINT_URL")
-        region = os.getenv("AWS_REGION")
-        s3 = boto3.client("s3",
-                           aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                           aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                           region_name=region,
-                           endpoint_url=endpoint or None)
-        resp = s3.get_object(Bucket=bucket, Key=obj.file_key)
-        body = resp["Body"].read()
-        return StreamingResponse(iter([body]), media_type=obj.content_type, headers={"Content-Disposition": f"attachment; filename={obj.file_name}"})
+        try:
+            endpoint = os.getenv("S3_ENDPOINT_URL")
+            region = os.getenv("AWS_REGION")
+            s3 = boto3.client(
+                "s3",
+                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                region_name=region or "auto",
+                endpoint_url=endpoint or None,
+                config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+            )
+            resp = s3.get_object(Bucket=bucket, Key=obj.file_key)
+            body = resp["Body"].read()
+            filename = urllib.parse.quote(obj.file_name)
+            return StreamingResponse(iter([body]), media_type=obj.content_type, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"})
+        except Exception:
+             # Fallback or error
+             pass
+
+    # Local file
+    if not os.path.isfile(obj.file_path):
+        raise HTTPException(status_code=404, detail="文件未找到")
+        
+    filename = urllib.parse.quote(obj.file_name)
     return FileResponse(obj.file_path, media_type=obj.content_type, filename=obj.file_name)
 
-
-@app.exception_handler(RequestValidationError)
-async def handle_validation_error(request: Request, exc: RequestValidationError):
-    return JSONResponse(status_code=422, content={"code": "VALIDATION_ERROR", "message": "请求参数校验失败", "details": exc.errors()})
-
-
-@app.exception_handler(HTTPException)
-async def handle_http_exception(request: Request, exc: HTTPException):
-    return JSONResponse(status_code=exc.status_code, content={"code": "HTTP_ERROR", "message": exc.detail or "请求错误"})
-
-
-@app.exception_handler(SQLAlchemyError)
-async def handle_sqlalchemy_error(request: Request, exc: SQLAlchemyError):
-    return JSONResponse(status_code=500, content={"code": "DB_ERROR", "message": "数据库错误"})
-
-
-@app.exception_handler(ResponseValidationError)
-async def handle_response_validation_error(request: Request, exc: ResponseValidationError):
-    return JSONResponse(status_code=500, content={"code": "RESPONSE_VALIDATION_ERROR", "message": "响应数据校验失败", "details": exc.errors()})
-
-@app.get("/api/students", response_model=list[StudentRead])
-def list_students(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    return get_students(db, skip, limit)
-
-
-@app.get("/api/students/{student_id}", response_model=StudentRead)
-def get_student_detail(student_id: int, db: Session = Depends(get_db)):
-    obj = get_student(db, student_id)
-    if not obj:
-        raise HTTPException(status_code=404)
-    return obj
-
-
-@app.post("/api/students", response_model=StudentRead, status_code=status.HTTP_201_CREATED)
-def create_student_endpoint(student: StudentCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    return create_student(db, student)
-
-
-@app.put("/api/students/{student_id}", response_model=StudentRead)
-def update_student_endpoint(student_id: int, student: StudentUpdate, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    obj = update_student(db, student_id, student)
-    if not obj:
-        raise HTTPException(status_code=404)
-    return obj
-
-
-@app.delete("/api/students/{student_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_student_endpoint(student_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    obj = delete_student(db, student_id)
-    if not obj:
-        raise HTTPException(status_code=404)
-    return None
-
-
-@app.post("/api/auth/register", response_model=UserRead, status_code=status.HTTP_201_CREATED)
-def register(user: UserCreate, db: Session = Depends(get_db)):
-    if get_user_by_username(db, user.username):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户名已存在")
-    hashed = get_password_hash(user.password)
-    obj = create_user(db, user, hashed)
-    return obj
-
-
-@app.post("/api/auth/login", response_model=Token)
-def login(data: LoginData, db: Session = Depends(get_db)):
-    u = get_user_by_username(db, data.username)
-    if not u or not verify_password(data.password, u.hashed_password):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码不正确")
-    token = create_access_token({"sub": u.username})
-    return {"access_token": token, "token_type": "bearer"}
+# Keep API endpoints for compatibility if needed, but UI is primary now.
+@app.get("/api/health")
+async def health_check():
+    return {"status": "healthy"}
